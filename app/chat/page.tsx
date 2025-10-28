@@ -1,7 +1,7 @@
 "use client"
 
 import { useRouter, useSearchParams } from "next/navigation"
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { useAuthStore } from "@/lib/store/authStore"
 
 interface Message {
@@ -23,7 +23,8 @@ export default function ChatPage() {
     australia: { name: "Australia", flag: "🇦🇺" },
   }
 
-  const country = countryMap[countryCode || "usa"]
+  // ✅ fallback if invalid country param
+  const country = countryMap[countryCode || "usa"] ?? countryMap["usa"]
 
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
@@ -32,7 +33,29 @@ export default function ChatPage() {
   const [error, setError] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // Initialize chat session
+  // ✅ Moved loadChatHistory above and wrapped in useCallback
+  const loadChatHistory = useCallback(async (id: string) => {
+    try {
+      const response = await fetch(`/api/chat/history?sessionId=${id}`)
+      if (!response.ok) throw new Error("Failed to load chat history")
+
+      const data = await response.json()
+      if (data.messages) {
+        setMessages(
+          data.messages.map((msg: any) => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+          })),
+        )
+      }
+    } catch (err) {
+      console.error("Error loading history:", err)
+      setError("Failed to load chat history")
+    }
+  }, [])
+
+  // ✅ Initialize chat session
   useEffect(() => {
     const initializeSession = async () => {
       if (!user?.id) return
@@ -47,11 +70,12 @@ export default function ChatPage() {
           }),
         })
 
+        if (!response.ok) throw new Error("Failed to initialize chat session")
+
         const data = await response.json()
         if (data.session) {
           setSessionId(data.session.id)
-          // Load chat history
-          loadChatHistory(data.session.id)
+          await loadChatHistory(data.session.id)
         }
       } catch (err) {
         console.error("Session initialization error:", err)
@@ -60,26 +84,7 @@ export default function ChatPage() {
     }
 
     initializeSession()
-  }, [user?.id, countryCode])
-
-  // Load chat history
-  const loadChatHistory = async (id: string) => {
-    try {
-      const response = await fetch(`/api/chat/history?sessionId=${id}`)
-      const data = await response.json()
-      if (data.messages) {
-        setMessages(
-          data.messages.map((msg: any) => ({
-            id: msg.id,
-            role: msg.role,
-            content: msg.content,
-          })),
-        )
-      }
-    } catch (err) {
-      console.error("Error loading history:", err)
-    }
-  }
+  }, [user?.id, countryCode, loadChatHistory])
 
   // Auto scroll to bottom
   useEffect(() => {
@@ -94,6 +99,11 @@ export default function ChatPage() {
   const handleSend = async () => {
     if (!input.trim() || !sessionId || loading) return
 
+    if (!user?.id) {
+      setError("You must be logged in to send messages.")
+      return
+    }
+
     const userMessage: Message = { role: "user", content: input }
     setMessages((prev) => [...prev, userMessage])
     setInput("")
@@ -107,11 +117,16 @@ export default function ChatPage() {
         body: JSON.stringify({
           sessionId,
           message: input,
-          userId: user?.id,
+          userId: user.id,
         }),
       })
 
-      const data = await response.json()
+      let data
+      try {
+        data = await response.json()
+      } catch {
+        throw new Error("Invalid response from server")
+      }
 
       if (!response.ok) {
         throw new Error(data.error || "Failed to get response")
@@ -119,15 +134,13 @@ export default function ChatPage() {
 
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          content: data.message,
-        },
+        { role: "assistant", content: data.message },
       ])
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "An error occurred"
       setError(errorMessage)
-      setMessages((prev) => prev.slice(0, -1)) // Remove user message on error
+      // ✅ remove the exact message we added
+      setMessages((prev) => prev.filter((m) => m !== userMessage))
     } finally {
       setLoading(false)
     }
@@ -147,7 +160,7 @@ export default function ChatPage() {
             </h1>
             <div className="flex items-center gap-4">
               <span className="text-foreground text-sm">{user?.name}</span>
-              <button onClick={handleLogout}  className="text-sm">
+              <button onClick={handleLogout} className="text-sm">
                 Logout
               </button>
             </div>
@@ -161,7 +174,9 @@ export default function ChatPage() {
           <div className="text-4xl">{country.flag}</div>
           <div>
             <h2 className="text-2xl font-bold text-foreground">Study in {country.name}</h2>
-            <p className="text-muted-foreground text-sm">Ask me anything about studying abroad.</p>
+            <p className="text-muted-foreground text-sm">
+              Ask me anything about studying abroad.
+            </p>
           </div>
         </div>
       </div>
@@ -192,7 +207,6 @@ export default function ChatPage() {
           {loading && (
             <div className="flex justify-start">
               <div className="bg-card border shadow-sm rounded-2xl rounded-bl-none px-5 py-3 flex items-center gap-2">
-               
                 <span className="text-muted-foreground text-sm">Thinking...</span>
               </div>
             </div>
@@ -220,8 +234,12 @@ export default function ChatPage() {
             disabled={loading}
             className="flex-1 border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-primary bg-background text-foreground disabled:opacity-50"
           />
-          <button onClick={handleSend} disabled={loading || !input.trim()} className="px-6">
-            {loading ? "loading" : "Send"}
+          <button
+            onClick={handleSend}
+            disabled={loading || !input.trim() || !sessionId}
+            className="px-6 py-3 bg-primary text-primary-foreground rounded-lg disabled:opacity-50"
+          >
+            {loading ? "Loading..." : "Send"}
           </button>
         </div>
       </div>
